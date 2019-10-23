@@ -525,6 +525,10 @@ void MetalDriver::setExternalImage(Handle<HwTexture> th, void* image) {
     texture->externalImage.set((CVPixelBufferRef) image);
 }
 
+void MetalDriver::setSynchronizedImage(Handle<HwTexture> th, SynchronizedImage&& image) {
+
+}
+
 void MetalDriver::setExternalStream(Handle<HwTexture> th, Handle<HwStream> sh) {
 
 }

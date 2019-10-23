@@ -102,7 +102,8 @@ public:
             mutable GLuint rb = 0;  // multi-sample sidecar renderbuffer
             GLenum target;
             GLenum internalFormat;
-            mutable GLsync fence = nullptr;
+            mutable GLsync blitFence = nullptr; // signals that a blit has finished
+            void* syncImage = nullptr;
 
             // texture parameters go here too
             GLfloat anisotropy = 1.0;
@@ -112,6 +113,11 @@ public:
         } gl;
 
         void* platformPImpl = nullptr;
+    };
+
+    struct GLSyncImage {
+        backend::SynchronizedImage image;
+        GLsync fence; // signals that the image can be released (i.e. its callback can be triggered)
     };
 
     class DebugMarker {
@@ -365,6 +371,7 @@ private:
 
     mutable tsl::robin_map<uint32_t, GLuint> mSamplerMap;
     mutable std::vector<GLTexture*> mExternalStreams;
+    mutable std::vector<GLSyncImage> mSyncImages;
 
 
     void attachStream(GLTexture* t, GLStream* stream) noexcept;

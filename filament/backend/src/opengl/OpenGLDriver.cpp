@@ -163,6 +163,10 @@ OpenGLDriver::~OpenGLDriver() noexcept {
 // ------------------------------------------------------------------------------------------------
 
 void OpenGLDriver::terminate() {
+    for (auto& pair : mSyncImages) {
+        glDeleteSync(pair.fence);
+    }
+    mSyncImages.clear();
     for (auto& item : mSamplerMap) {
         mContext.unbindSampler(item.second);
         glDeleteSamplers(1, &item.second);
@@ -1089,8 +1093,8 @@ void OpenGLDriver::destroyTexture(Handle<HwTexture> th) {
             assert(t->gl.rb == 0);
             glDeleteRenderbuffers(1, &t->gl.id);
         }
-        if (t->gl.fence) {
-            glDeleteSync(t->gl.fence);
+        if (t->gl.blitFence) {
+            glDeleteSync(t->gl.blitFence);
         }
         destruct(th, t);
     }
@@ -1717,6 +1721,22 @@ void OpenGLDriver::setExternalImage(Handle<HwTexture> th, void* image) {
     }
 }
 
+void OpenGLDriver::setSynchronizedImage(Handle<HwTexture> th, SynchronizedImage&& image) {
+    GLTexture* t = handle_cast<GLTexture*>(th);
+
+    setExternalImage(th, image.image);
+
+    // If replacing an existing synchronized image, we can trigger its release callback as soon
+    // as the GPU finishes its work up till this point.
+    if (t->gl.syncImage && t->gl.syncImage != image.image) {
+        GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        glFlush();
+
+        t->gl.syncImage = image.image;
+        mSyncImages.push_back((GLSyncImage){std::move(image), fence});
+    }
+}
+
 void OpenGLDriver::setExternalStream(Handle<HwTexture> th, Handle<HwStream> sh) {
     auto& gl = mContext;
     if (gl.ext.OES_EGL_image_external_essl3) {
@@ -2140,6 +2160,9 @@ void OpenGLDriver::updateStream(GLTexture* t, DriverApi* driver) noexcept {
             Platform::ExternalTexture* ets = s->user_thread.infos[s->user_thread.cur].ets;
             mPlatform.reallocateExternalStorage(ets, info.width, info.height, TextureFormat::RGB8);
 
+            // Each read texture (external) has a corollary write texture (2D) and they are
+            // aliased to the same backing image. The shader always uses an external sampler, which
+            // allows it to be agnostic of the synchronization strategy.
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, writeTexture);
             glBindTexture(GL_TEXTURE_EXTERNAL_OES, readTexture);
@@ -2151,7 +2174,7 @@ void OpenGLDriver::updateStream(GLTexture* t, DriverApi* driver) noexcept {
 
         // copy the texture...
 #ifndef NDEBUG
-        if (t->gl.fence) {
+        if (t->gl.blitFence) {
             // we're about to overwrite a buffer that hasn't been consumed
             slog.d << "OpenGLDriver::updateStream(): about to overwrite buffer " <<
                    int(s->user_thread.cur) << " of Texture at " << t << " of Stream at " << s
@@ -2178,12 +2201,12 @@ void OpenGLDriver::updateStream(GLTexture* t, DriverApi* driver) noexcept {
             auto& streams = mExternalStreams;
             if (UTILS_LIKELY(std::find(streams.begin(), streams.end(), t) != streams.end()) &&
                 (t->hwStream == s)) {
-                if (UTILS_UNLIKELY(t->gl.fence)) {
+                if (UTILS_UNLIKELY(t->gl.blitFence)) {
                     // if the texture still has a fence set, destroy it now, so it's not leaked.
-                    glDeleteSync(t->gl.fence);
+                    glDeleteSync(t->gl.blitFence);
                 }
                 t->gl.id = readTexture;
-                t->gl.fence = fence;
+                t->gl.blitFence = fence;
                 s->gl.externalTexture2DId = writeTexture;
             } else {
                 glDeleteSync(fence);
@@ -2444,6 +2467,21 @@ void OpenGLDriver::beginFrame(int64_t monotonic_clock_ns, uint32_t frameId,
                         &static_cast<GLStream*>(t->hwStream)->user_thread.timestamp);
                 // NOTE: We assume that updateTexImage() binds the texture on our behalf
                 gl.updateTexImage(GL_TEXTURE_EXTERNAL_OES, t->gl.id);
+            }
+        }
+    }
+    if (UTILS_UNLIKELY(!mSyncImages.empty())) {
+        std::vector<GLSyncImage> pairs;
+        std::swap(pairs, mSyncImages);
+        for (auto& pair : pairs) {
+            GLint status[1];
+            GLsizei length = 1;
+            glGetSynciv(pair.fence, GL_SYNC_STATUS, sizeof(status), &length, status);
+            if (status[0] == GL_SIGNALED) {
+                glDeleteSync(pair.fence);
+                scheduleRelease(std::move(pair.image));
+            } else {
+                mSyncImages.push_back(std::move(pair));
             }
         }
     }

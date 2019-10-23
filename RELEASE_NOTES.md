@@ -6,6 +6,7 @@ A new header is inserted each time a *tag* is created.
 ## Next release
 
 - Add Java / Kotlin bindings for gltfio::Animator.
+- Introduce SynchronizedImage for copy-free synchronized external images on Android.
 
 ## v1.4.1
 
